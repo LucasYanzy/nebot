@@ -125,11 +125,32 @@ async def on_message(message: discord.Message):
             except Exception as e:
                 logger.error(f"Failed to send ticker embed: {e}")
 
+    # Command: !now — force one poll cycle
+    elif message.content.strip() == "!now":
+        await message.channel.send("⏳ 正在拉取最新新闻...")
+        try:
+            items = await scanner.fetch_latest()
+        except Exception as e:
+            await message.channel.send(f"拉取失败: {e}")
+            return
+        if not items:
+            await message.channel.send("暂无新新闻。")
+            return
+        for item in items:
+            try:
+                embed = build_discord_embed(item)
+                await message.channel.send(embed=embed)
+            except Exception as e:
+                logger.error(f"Failed to send embed: {e}")
+            await asyncio.sleep(0.3)
+        await message.channel.send(f"✅ 已推送 {len(items)} 条新闻。")
+
     # Command: /help
     elif message.content.strip() == "/help":
         help_text = (
             "**Finance News Bot — 指令**\n"
             "`/news TICKER` — 查询特定股票的最新新闻（如 `/news AAPL`）\n"
+            "`!now` — 立即拉取一轮最新新闻\n"
             "`/help` — 显示此帮助\n"
             "\n新闻自动推送中，每天美东 16:00 发送每日总结。"
         )
