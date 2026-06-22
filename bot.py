@@ -21,7 +21,8 @@ load_dotenv()
 
 DISCORD_TOKEN = os.getenv("DISCORD_BOT_TOKEN", "")
 FINNHUB_KEY = os.getenv("FINNHUB_API_KEY", "")
-CHANNEL_ID = int(os.getenv("DISCORD_CHANNEL_ID", "0"))
+CHANNEL_ID_STR = os.getenv("DISCORD_CHANNEL_ID", "0")
+CHANNEL_ID = int(CHANNEL_ID_STR)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(levelname)s: %(message)s")
 logger = logging.getLogger("finance-bot")
@@ -41,14 +42,18 @@ _daily_news: list[dict] = []
 # ─── Helpers ────────────────────────────────────────────────────────
 
 def _is_config_valid() -> bool:
+    """Validate and log config. Does NOT exit — returns False if broken."""
+    logger.info(f"ENV check: TOKEN={'SET' if DISCORD_TOKEN and DISCORD_TOKEN != 'your_bot_token_here' else 'MISSING'}")
+    logger.info(f"ENV check: FINNHUB={'SET' if FINNHUB_KEY and FINNHUB_KEY != 'your_finnhub_key_here' else 'MISSING'}")
+    logger.info(f"ENV check: CHANNEL_ID={CHANNEL_ID_STR}")
     if DISCORD_TOKEN in ("", "your_bot_token_here"):
-        logger.error("DISCORD_BOT_TOKEN not set in .env")
+        logger.error("DISCORD_BOT_TOKEN not set")
         return False
     if FINNHUB_KEY in ("", "your_finnhub_key_here"):
-        logger.error("FINNHUB_API_KEY not set in .env")
+        logger.error("FINNHUB_API_KEY not set")
         return False
     if CHANNEL_ID == 0:
-        logger.error("DISCORD_CHANNEL_ID not set in .env")
+        logger.error("DISCORD_CHANNEL_ID not set or zero")
         return False
     return True
 
