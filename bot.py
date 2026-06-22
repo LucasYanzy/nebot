@@ -231,7 +231,13 @@ async def on_message(message: discord.Message):
     channel = message.channel
 
     # ── @mention: reply with help ──────────────────────────────
-    if bot.user in message.mentions:
+    me = message.guild.me if message.guild else None
+    mentioned = (
+        (me and me in message.mentions)
+        or bot.user in message.mentions
+        or any(m.id == bot.user.id for m in message.mentions)
+    )
+    if mentioned:
         await channel.send(HELP_TEXT)
         return
 
