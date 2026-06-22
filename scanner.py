@@ -66,6 +66,20 @@ class NewsScanner:
 
         return new_items
 
+    async def fetch_all_now(self) -> list[dict]:
+        """Fetch latest news with NO dedup — show everything Finnhub returns now."""
+        await self._ensure_session()
+        url = f"{FINNHUB_BASE}/news?category=general&token={self.api_key}"
+        try:
+            async with self._session.get(url, timeout=15) as resp:
+                resp.raise_for_status()
+                items: list[dict] = await resp.json()
+        except Exception as e:
+            logger.error(f"Fetch now failed: {e}")
+            return []
+
+        return items
+
     async def cold_start_fetch(self) -> list[dict]:
         """Async initial fetch — returns last 10 new items, no flood."""
         await self._ensure_session()

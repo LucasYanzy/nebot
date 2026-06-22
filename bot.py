@@ -129,7 +129,7 @@ async def on_message(message: discord.Message):
     elif message.content.strip() == "!now":
         await message.channel.send("⏳ 正在拉取最新新闻...")
         try:
-            items = await scanner.fetch_latest()
+            items = await scanner.fetch_all_now()
         except Exception as e:
             await message.channel.send(f"拉取失败: {e}")
             return
