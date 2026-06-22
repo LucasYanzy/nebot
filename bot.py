@@ -6,6 +6,7 @@ Polls Finnhub for financial news and pushes formatted updates to a Discord chann
 import asyncio
 import logging
 import os
+from collections import Counter
 from datetime import datetime, timezone
 
 import discord
@@ -38,6 +39,13 @@ scanner = NewsScanner(api_key=FINNHUB_KEY)
 # Daily summary accumulator
 _daily_news: list[dict] = []
 
+# Cached last fetch for filter commands
+_last_fetched_items: list[dict] = []
+
+# ─── Keyword hotness tracking ──────────────────────────────────────
+_hotness_counter: Counter = Counter()
+_recent_headlines: list[str] = []
+
 
 # ─── Helpers ────────────────────────────────────────────────────────
 
@@ -56,6 +64,128 @@ def _is_config_valid() -> bool:
         logger.error("DISCORD_CHANNEL_ID not set or zero")
         return False
     return True
+
+
+def _track_hotness(items: list[dict]):
+    """Update keyword hotness from news items."""
+    for item in items:
+        text = f"{item.get('headline', '')} {item.get('summary', '')}"
+        _recent_headlines.append(text)
+        tickers = extract_tickers(text)
+        for t in tickers:
+            _hotness_counter[t] += 1
+    # Keep only last 200 headlines for windowed stats
+    if len(_recent_headlines) > 200:
+        _recent_headlines[:] = _recent_headlines[-200:]
+
+
+def _get_hot_keywords(top_n: int = 15) -> list[tuple[str, int]]:
+    """Return top N hot keywords (tickers) with counts."""
+    return _hotness_counter.most_common(top_n)
+
+
+HELP_TEXT = (
+    "**Finance News Bot — 指令**\n"
+    "`/news TICKER` — 查询特定股票的最新新闻（如 `/news AAPL`）\n"
+    "`!now` — 立即拉取一轮最新新闻\n"
+    "`!green` / `!bull` — 只看 🟢 利好新闻\n"
+    "`!red` / `!bear` — 只看 🔴 利空新闻\n"
+    "`!all` — 显示全部新闻（重置过滤器）\n"
+    "`!hot` — 🔥 当前热词统计 Top 15\n"
+    "`/help` 或 @我 — 显示此帮助\n"
+    "\n新闻自动推送中，每天美东 16:00 发送每日总结。"
+)
+
+
+# ─── Interactive Filter View (Buttons) ─────────────────────────────
+
+class NewsFilterView(discord.ui.View):
+    """Interactive buttons to filter news by sentiment / show hot keywords."""
+
+    def __init__(self, items: list[dict], timeout: float = 300):
+        super().__init__(timeout=timeout)
+        self.items = items
+
+    @discord.ui.button(label="🟢 利好", style=discord.ButtonStyle.success, custom_id="filter_green")
+    async def filter_green(self, interaction: discord.Interaction, button: discord.ui.Button):
+        filtered = [it for it in self.items if detect_sentiment(
+            f"{it.get('headline', '')} {it.get('summary', '')}"
+        ) == "🟢"]
+        await interaction.response.defer()
+        await _send_filtered(interaction.channel, filtered, "🟢 利好新闻", delete_after=60)
+
+    @discord.ui.button(label="🔴 利空", style=discord.ButtonStyle.danger, custom_id="filter_red")
+    async def filter_red(self, interaction: discord.Interaction, button: discord.ui.Button):
+        filtered = [it for it in self.items if detect_sentiment(
+            f"{it.get('headline', '')} {it.get('summary', '')}"
+        ) == "🔴"]
+        await interaction.response.defer()
+        await _send_filtered(interaction.channel, filtered, "🔴 利空新闻", delete_after=60)
+
+    @discord.ui.button(label="🟡 中性", style=discord.ButtonStyle.secondary, custom_id="filter_neutral")
+    async def filter_neutral(self, interaction: discord.Interaction, button: discord.ui.Button):
+        filtered = [it for it in self.items if detect_sentiment(
+            f"{it.get('headline', '')} {it.get('summary', '')}"
+        ) == "🟡"]
+        await interaction.response.defer()
+        await _send_filtered(interaction.channel, filtered, "🟡 中性新闻", delete_after=60)
+
+    @discord.ui.button(label="🔥 热词", style=discord.ButtonStyle.primary, custom_id="filter_hot")
+    async def show_hot(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        hot = _get_hot_keywords(15)
+        if not hot:
+            await interaction.channel.send("暂无热词数据，先发 `!now` 拉取新闻。", delete_after=30)
+            return
+        lines = ["**🔥 当前热词 Top 15**", ""]
+        for i, (word, count) in enumerate(hot, 1):
+            emoji = "🥇" if i == 1 else "🥈" if i == 2 else "🥉" if i == 3 else f"{i}."
+            lines.append(f"{emoji} **${word}** — {count} 次提及")
+        await interaction.channel.send("\n".join(lines))
+
+    @discord.ui.button(label="📋 全部", style=discord.ButtonStyle.secondary, custom_id="filter_all")
+    async def show_all(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        await _send_filtered(interaction.channel, self.items, "📋 全部新闻", delete_after=60)
+
+
+async def _send_filtered(channel, items: list[dict], label: str, delete_after: int = 60):
+    """Send filtered news items to channel."""
+    if not items:
+        msg = await channel.send(f"{label}：暂无匹配新闻。", delete_after=delete_after)
+        return
+    await channel.send(f"**{label}** — 共 {len(items)} 条：", delete_after=delete_after)
+    for item in items:
+        try:
+            embed = build_discord_embed(item)
+            await channel.send(embed=embed, delete_after=delete_after)
+        except Exception as e:
+            logger.error(f"Failed to send filtered embed: {e}")
+        await asyncio.sleep(0.3)
+
+
+async def _send_news_batch(channel, items: list[dict]):
+    """Send news batch with interactive filter buttons."""
+    global _last_fetched_items
+    _last_fetched_items = items
+
+    _track_hotness(items)
+
+    for item in items:
+        try:
+            embed = build_discord_embed(item)
+            await channel.send(embed=embed)
+        except Exception as e:
+            logger.error(f"Failed to send embed: {e}")
+        await asyncio.sleep(0.3)
+
+    # Send filter panel with buttons
+    view = NewsFilterView(items, timeout=300)
+    await channel.send(
+        f"✅ 已推送 {len(items)} 条新闻 | 点击下方按钮筛选：",
+        view=view,
+        delete_after=300,
+    )
 
 
 # ─── Events ─────────────────────────────────────────────────────────
@@ -97,16 +227,23 @@ async def on_message(message: discord.Message):
     if message.author == bot.user:
         return
 
-    # Command: /news <ticker> — on-demand stock news
-    if message.content.startswith("/news"):
-        parts = message.content.split()
+    content = message.content.strip()
+    channel = message.channel
+
+    # ── @mention: reply with help ──────────────────────────────
+    if bot.user in message.mentions:
+        await channel.send(HELP_TEXT)
+        return
+
+    # ── /news TICKER ───────────────────────────────────────────
+    if content.startswith("/news"):
+        parts = content.split()
         if len(parts) < 2:
-            await message.channel.send("用法: `/news TICKER`  例如 `/news AAPL`")
+            await channel.send("用法: `/news TICKER`  例如 `/news AAPL`")
             return
 
         ticker = parts[1].upper().strip("$")
-        await message.channel.send(f"🔍 正在查询 ${ticker} 相关新闻...")
-        # Use scanner to fetch (Finnhub /news endpoint covers all)
+        await channel.send(f"🔍 正在查询 ${ticker} 相关新闻...")
         items = await scanner.fetch_latest()
         ticker_items = []
         for item in items:
@@ -115,46 +252,72 @@ async def on_message(message: discord.Message):
                 ticker_items.append(item)
 
         if not ticker_items:
-            await message.channel.send(f"未找到 ${ticker} 的相关新闻。")
+            await channel.send(f"未找到 ${ticker} 的相关新闻。")
             return
 
-        for item in ticker_items[:5]:  # max 5
+        for item in ticker_items[:5]:
             try:
                 embed = build_discord_embed(item)
-                await message.channel.send(embed=embed)
+                await channel.send(embed=embed)
             except Exception as e:
                 logger.error(f"Failed to send ticker embed: {e}")
+        return
 
-    # Command: !now — force one poll cycle
-    elif message.content.strip() == "!now":
-        await message.channel.send("⏳ 正在拉取最新新闻...")
+    # ── !now ──────────────────────────────────────────────────
+    if content == "!now":
+        await channel.send("⏳ 正在拉取最新新闻...")
         try:
             items = await scanner.fetch_all_now()
         except Exception as e:
-            await message.channel.send(f"拉取失败: {e}")
+            await channel.send(f"拉取失败: {e}")
             return
         if not items:
-            await message.channel.send("暂无新新闻。")
+            await channel.send("暂无新新闻。")
             return
-        for item in items:
-            try:
-                embed = build_discord_embed(item)
-                await message.channel.send(embed=embed)
-            except Exception as e:
-                logger.error(f"Failed to send embed: {e}")
-            await asyncio.sleep(0.3)
-        await message.channel.send(f"✅ 已推送 {len(items)} 条新闻。")
+        await _send_news_batch(channel, items)
+        return
 
-    # Command: /help
-    elif message.content.strip() == "/help":
-        help_text = (
-            "**Finance News Bot — 指令**\n"
-            "`/news TICKER` — 查询特定股票的最新新闻（如 `/news AAPL`）\n"
-            "`!now` — 立即拉取一轮最新新闻\n"
-            "`/help` — 显示此帮助\n"
-            "\n新闻自动推送中，每天美东 16:00 发送每日总结。"
-        )
-        await message.channel.send(help_text)
+    # ── !green / !bull — bullish only ─────────────────────────
+    if content in ("!green", "!bull"):
+        items = _last_fetched_items if _last_fetched_items else await scanner.fetch_all_now()
+        filtered = [it for it in items if detect_sentiment(
+            f"{it.get('headline', '')} {it.get('summary', '')}"
+        ) == "🟢"]
+        await _send_filtered(channel, filtered, "🟢 利好新闻")
+        return
+
+    # ── !red / !bear — bearish only ───────────────────────────
+    if content in ("!red", "!bear"):
+        items = _last_fetched_items if _last_fetched_items else await scanner.fetch_all_now()
+        filtered = [it for it in items if detect_sentiment(
+            f"{it.get('headline', '')} {it.get('summary', '')}"
+        ) == "🔴"]
+        await _send_filtered(channel, filtered, "🔴 利空新闻")
+        return
+
+    # ── !all — reset filter, show all ─────────────────────────
+    if content == "!all":
+        items = _last_fetched_items if _last_fetched_items else await scanner.fetch_all_now()
+        await _send_filtered(channel, items, "📋 全部新闻")
+        return
+
+    # ── !hot — trending keywords ──────────────────────────────
+    if content == "!hot":
+        hot = _get_hot_keywords(15)
+        if not hot:
+            await channel.send("暂无热词数据，先发 `!now` 拉取新闻。")
+            return
+        lines = ["**🔥 当前热词 Top 15**", ""]
+        for i, (word, count) in enumerate(hot, 1):
+            emoji = "🥇" if i == 1 else "🥈" if i == 2 else "🥉" if i == 3 else f"{i}."
+            lines.append(f"{emoji} **${word}** — {count} 次提及")
+        await channel.send("\n".join(lines))
+        return
+
+    # ── /help ─────────────────────────────────────────────────
+    if content == "/help":
+        await channel.send(HELP_TEXT)
+        return
 
 
 # ─── Background Tasks ───────────────────────────────────────────────
@@ -172,6 +335,11 @@ async def news_poll_loop():
         logger.error(f"Poll error: {e}")
         return
 
+    if not items:
+        return
+
+    _track_hotness(items)
+
     for item in items:
         try:
             embed = build_discord_embed(item)
@@ -179,33 +347,38 @@ async def news_poll_loop():
             _daily_news.append(item)
         except Exception as e:
             logger.error(f"Failed to send embed: {e}")
-
-        # Rate-limit Discord sends (5/s for non-verified bots)
         await asyncio.sleep(0.3)
 
 
 @tasks.loop(hours=24)
 async def daily_summary_task():
     """Send a pinned daily summary at 16:00 ET (21:00 UTC)."""
-    # This task runs every 24h; we check if current hour is ~21 UTC
     now = datetime.now(timezone.utc)
     if now.hour != 21:
-        return  # only run at ~21 UTC
+        return
 
     channel = bot.get_channel(CHANNEL_ID)
     if channel is None or not _daily_news:
         return
 
     ticker_count: dict[str, int] = {}
+    green = red = neutral = 0
     for item in _daily_news:
         text = f"{item.get('headline', '')} {item.get('summary', '')}"
         sentiment = detect_sentiment(text)
+        if sentiment == "🟢":
+            green += 1
+        elif sentiment == "🔴":
+            red += 1
+        else:
+            neutral += 1
         for t in extract_tickers(text):
             ticker_count[t] = ticker_count.get(t, 0) + 1
 
     summary_lines = [
         f"**📋 每日金融新闻总结 — {now.strftime('%Y-%m-%d')}**",
         f"今日共推送 **{len(_daily_news)}** 条新闻",
+        f"🟢 {green} 条利好  |  🔴 {red} 条利空  |  🟡 {neutral} 条中性",
         "",
     ]
 
@@ -229,7 +402,6 @@ async def daily_summary_task():
 @daily_summary_task.before_loop
 async def _before_daily_summary():
     await bot.wait_until_ready()
-    # Align to next 21:00 UTC
     now = datetime.now(timezone.utc)
     target = now.replace(hour=21, minute=0, second=0, microsecond=0)
     if target <= now:
