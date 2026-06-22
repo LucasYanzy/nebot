@@ -21,8 +21,8 @@ load_dotenv()
 
 DISCORD_TOKEN = os.getenv("DISCORD_BOT_TOKEN", "")
 FINNHUB_KEY = os.getenv("FINNHUB_API_KEY", "")
-CHANNEL_ID_STR = os.getenv("DISCORD_CHANNEL_ID", "0")
-CHANNEL_ID = int(CHANNEL_ID_STR)
+CHANNEL_ID_STR = os.getenv("DISCORD_CHANNEL_ID", "")
+CHANNEL_ID = int(CHANNEL_ID_STR) if CHANNEL_ID_STR.strip() else 0
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(levelname)s: %(message)s")
 logger = logging.getLogger("finance-bot")
