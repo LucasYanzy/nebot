@@ -419,3 +419,4 @@ if __name__ == "__main__":
         logger.critical("Missing credentials in .env. Exiting.")
         exit(1)
     bot.run(DISCORD_TOKEN)
+
