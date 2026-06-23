@@ -238,6 +238,7 @@ async def on_message(message: discord.Message):
         or any(m.id == bot.user.id for m in message.mentions)
     )
     if mentioned:
+        logger.info(f"Mention detected from {message.author}, replying with help")
         await channel.send(HELP_TEXT)
         return
 
